@@ -1,0 +1,105 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # Pyroscope Java agent sends profiles here (same /ingest API as Pyroscope server).
+  # Set PYROSCOPE_SERVER_ADDRESS=http://<collector-host>:4040 in the Java agent — no code changes.
+  pyroscopereceiver:
+    endpoint: 0.0.0.0:4040
+
+processors:
+  batch:
+    send_batch_size: 100
+    send_batch_max_size: 200
+    timeout: 10s
+
+exporters:
+  debug:
+    verbosity: detailed
+
+  kafka/traces:
+    brokers:
+      - 'localhost:9092'
+    topic: otel-traces
+    protocol_version: 2.0.0
+    encoding: otlp_json
+    producer:
+      required_acks: 1
+      compression: gzip
+      max_message_bytes: 2000000
+
+  kafka/metrics:
+    brokers:
+      - 'localhost:9092'
+    topic: otel-metrics
+    protocol_version: 2.0.0
+    encoding: otlp_json
+    producer:
+      required_acks: 1
+      compression: gzip
+
+  kafka/logs:
+    brokers:
+      - 'localhost:9092'
+    topic: otel-logs
+    protocol_version: 2.0.0
+    encoding: otlp_json
+    producer:
+      required_acks: 1
+      compression: gzip
+
+  # Profiles → Kafka (otlp_json encoding, same pattern as traces/metrics/logs).
+  # Requires otelcol-contrib >= 0.97.0 for profiles signal support in kafkaexporter.
+  kafka/profiles:
+    brokers:
+      - 'localhost:9092'
+    topic: otel-profiles
+    protocol_version: 2.0.0
+    encoding: otlp_json
+    producer:
+      required_acks: 1
+      compression: gzip
+      max_message_bytes: 2000000   # profiles can be large; keep consistent with traces
+
+service:
+  pipelines:
+    traces:
+      receivers:
+        - otlp
+      processors:
+        - batch
+      exporters:
+        - kafka/traces
+
+    metrics:
+      receivers:
+        - otlp
+      exporters:
+        - kafka/metrics
+
+    logs:
+      receivers:
+        - otlp
+      exporters:
+        - kafka/logs
+
+    # Option A: receives profiles from pyroscopereceiver (Pyroscope wire protocol, no code change).
+    # profiles:
+    #   receivers:  [pyroscopereceiver]
+    #   processors: [batch]
+    #   exporters:  [kafka/profiles]
+
+    # Option B (active): receives profiles from OtlpGrpcProfileExporter via standard OTLP gRPC.
+    # The Java exporter converts JFR → OTel Profile proto and sends to port 4317.
+    # Profiles share the same otlp receiver as traces/metrics/logs — no extra port needed.
+    profiles:
+      receivers:
+        - otlp          # same receiver as traces/metrics/logs, port 4317
+      processors:
+        - batch
+      exporters:
+        - kafka/profiles

@@ -1,21 +1,99 @@
 plugins {
     id 'org.jetbrains.kotlin.jvm' version '2.3.0'
+    id 'com.gradleup.shadow'      version '8.3.9'
 }
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// Java 11 required: OtlpGrpcProfileExporter uses jdk.jfr.consumer (RecordingFile, RecordedEvent)
+// which is only public API in Java 11+.
 java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
 }
 
 repositories {
     mavenCentral()
 }
+
 dependencies {
     implementation(project(":agent"))
+
+    // ── OTel Profiles proto + gRPC service stubs ──────────────────────────
+    // Contains generated Java classes for all OTel signals including
+    // opentelemetry.proto.profiles.v1development and the ProfilesService gRPC stub.
+    implementation 'io.opentelemetry.proto:opentelemetry-proto:1.5.0-alpha'
+
+    // ── gRPC runtime ──────────────────────────────────────────────────────
+    // Netty-shaded transport — avoids Netty version conflicts with the app.
+    implementation 'io.grpc:grpc-netty-shaded:1.62.2'
+    // Stub API (blocking + async stubs)
+    implementation 'io.grpc:grpc-stub:1.62.2'
+    // Protobuf codec for gRPC frames
+    implementation 'io.grpc:grpc-protobuf:1.62.2'
+
+    // javax.annotation required by gRPC generated code on Java 9+
+    implementation 'javax.annotation:javax.annotation-api:1.3.2'
+
+    // ── OTel SDK — SpanProcessor / PyroscopeSpanProcessor ─────────────────
+    // compileOnly: when loaded as an OTel javaagent extension the SDK is
+    // already provided by opentelemetry-javaagent.jar at runtime.
+    compileOnly 'io.opentelemetry:opentelemetry-sdk:1.38.0'
+    // SPI interface AutoConfigurationCustomizerProvider (PyroscopeOtelExtension)
+    compileOnly 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.38.0'
 }
-kotlin{
-    compilerOptions{
-        jvmTarget.set(JvmTarget.JVM_1_8)
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_11)
     }
 }
+
+shadowJar {
+    archiveFileName = "demo-with-exporters.jar"
+
+    manifest {
+        attributes 'Main-Class': 'OtlpApp'
+    }
+
+    // Relocate shaded deps to avoid conflicts if pyroscope.jar is also on classpath
+    relocate 'io.grpc',                    'io.pyroscope.demo.vendor.io.grpc'
+    relocate 'io.netty',                   'io.pyroscope.demo.vendor.io.netty'
+    relocate 'io.opentelemetry.proto',     'io.pyroscope.demo.vendor.io.opentelemetry.proto'
+
+    // native .so files from pyroscope.jar are already bundled there; exclude duplicates
+    exclude '**.so'
+    exclude '**.so.sha1'
+    exclude 'META-INF/INDEX.LIST'
+    // Exclude all SPI service files from bundled deps to avoid conflicting with the OTel agent.
+    // Our OTel extension SPI is delivered via the separate extensionJar task below.
+    exclude 'META-INF/services/**'
+}
+
+// ── Minimal OTel extension jar ────────────────────────────────────────────────
+// Contains ONLY PyroscopeSpanProcessor + PyroscopeOtelExtension + SPI file.
+// No gRPC / netty / protobuf bundled — avoids class conflicts when loaded as
+// -Dotel.javaagent.extensions=pyroscope-otel-extension.jar alongside pyroscope.jar.
+// At runtime, ScopedContext / LabelsSet are provided by -javaagent:pyroscope.jar
+// which is already on the system classloader.
+tasks.register('extensionJar', Jar) {
+    archiveFileName = "pyroscope-otel-extension.jar"
+    destinationDirectory = layout.buildDirectory.dir("libs")
+
+    // Only our two OTel integration classes
+    from(sourceSets.main.output) {
+        include 'io/pyroscope/otel/**'
+    }
+    // SPI registration file
+    from(sourceSets.main.resources) {
+        include 'META-INF/services/**'
+    }
+
+    manifest {
+        attributes(
+            'Implementation-Title':   'Pyroscope OTel Extension',
+            'Implementation-Version': project.version
+        )
+    }
+}
+
+assemble.dependsOn extensionJar

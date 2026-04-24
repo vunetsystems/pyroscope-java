@@ -1,0 +1,60 @@
+services:
+
+  # ── Grafana Pyroscope (profile storage & UI) ──────────────────────────────
+  pyroscope:
+    image: grafana/pyroscope:1.18.0
+    ports:
+      - "4041:4040"        # expose on 4041 so it doesn't collide with the collector
+    command:
+      - -config.file=/etc/pyroscope/config.yaml
+    volumes:
+      - pyroscope-data:/data
+
+  # ── OpenTelemetry Collector (pyroscopereceiver) ───────────────────────────
+  otel-collector:
+    image: grafana/otelcol-contrib:0.97.0   # includes pyroscopereceiver
+    ports:
+      - "4040:4040"        # Java agent sends profiles here
+      - "13133:13133"      # health check
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - pyroscope
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Java application (uses pyroscope.jar agent) ───────────────────────────
+  app:
+    build: .
+    environment:
+      # ── Required ──────────────────────────────────────────────────────────
+      - PYROSCOPE_APPLICATION_NAME=my-java-app
+      # Point at the OTel Collector, NOT directly at Pyroscope.
+      # The pyroscopereceiver exposes the exact same /ingest API.
+      - PYROSCOPE_SERVER_ADDRESS=http://otel-collector:4040
+
+      # ── Profiling settings ────────────────────────────────────────────────
+      - PYROSCOPE_FORMAT=jfr
+      - PYROSCOPE_PROFILER_EVENT=itimer
+      - PYROSCOPE_PROFILER_ALLOC=512k
+      - PYROSCOPE_PROFILER_LOCK=10ms
+      - PYROSCOPE_PROFILING_INTERVAL=10ms
+      - PYROSCOPE_UPLOAD_INTERVAL=15s
+
+      # ── Labels (appear as dimensions in Grafana) ──────────────────────────
+      - PYROSCOPE_LABELS=env=production,region=us-east-1
+
+      # ── Optional tuning ───────────────────────────────────────────────────
+      - PYROSCOPE_LOG_LEVEL=info
+      - PYROSCOPE_INGEST_MAX_TRIES=8
+    ports:
+      - "8080:8080"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+
+volumes:
+  pyroscope-data:

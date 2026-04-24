@@ -1,0 +1,131 @@
+# Kubernetes manifests for Option A (pyroscopereceiver)
+# Deploys: OTel Collector as a DaemonSet (or Deployment) + ConfigMap
+# Your Java pods just set PYROSCOPE_SERVER_ADDRESS to the collector service.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    receivers:
+      pyroscopereceiver:
+        endpoint: 0.0.0.0:4040
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 100
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 128
+
+    exporters:
+      otlphttp/pyroscope:
+        endpoint: http://pyroscope.monitoring.svc.cluster.local:4040
+        # For Grafana Cloud:
+        # endpoint: https://<your-stack-host>/otlp
+        # headers:
+        #   Authorization: "Basic <base64-encoded-credentials>"
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        profiles:
+          receivers: [pyroscopereceiver]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/pyroscope]
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: grafana/otelcol-contrib:0.97.0
+          args: ["--config=/etc/otelcol-contrib/config.yaml"]
+          ports:
+            - containerPort: 4040   # pyroscopereceiver
+              name: pyroscope
+            - containerPort: 13133  # health check
+              name: health
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol-contrib/config.yaml
+              subPath: config.yaml
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: monitoring
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: pyroscope
+      port: 4040
+      targetPort: 4040
+    - name: health
+      port: 13133
+      targetPort: 13133
+
+---
+# Example: how to configure the Java app Deployment
+# Add these env vars to your existing app Deployment spec.
+# No other changes needed.
+#
+# env:
+#   - name: PYROSCOPE_APPLICATION_NAME
+#     value: "my-java-app"
+#   - name: PYROSCOPE_SERVER_ADDRESS
+#     value: "http://otel-collector.monitoring.svc.cluster.local:4040"
+#   - name: PYROSCOPE_FORMAT
+#     value: "jfr"
+#   - name: PYROSCOPE_PROFILER_EVENT
+#     value: "itimer"
+#   - name: PYROSCOPE_PROFILER_ALLOC
+#     value: "512k"
+#   - name: PYROSCOPE_UPLOAD_INTERVAL
+#     value: "15s"
+#   - name: PYROSCOPE_LABELS
+#     value: "env=production,region=us-east-1"

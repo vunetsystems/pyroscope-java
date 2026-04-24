@@ -1,0 +1,37 @@
+# otel-collector-config-grafana-cloud.yaml
+# Use this variant to send profiles to Grafana Cloud instead of self-hosted Pyroscope.
+#
+# Obtain these values from your Grafana Cloud stack:
+#   My Account → Stack → Details → OpenTelemetry
+
+receivers:
+  pyroscopereceiver:
+    endpoint: 0.0.0.0:4040
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 100
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+exporters:
+  otlphttp/grafana-cloud:
+    endpoint: https://<your-stack-host>/otlp   # e.g. https://otlp-gateway-prod-us-east-0.grafana.net/otlp
+    headers:
+      # base64("<instanceId>:<apiToken>")
+      Authorization: "Basic <base64-encoded-credentials>"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    profiles:
+      receivers: [pyroscopereceiver]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana-cloud]

@@ -1,45 +1,38 @@
-import java.util.jar.JarFile
-
 plugins {
     id 'java-library'
     id 'maven-publish'
     id 'signing'
-    id "com.gradleup.shadow" version '8.3.9'
+    id "com.gradleup.shadow"  version '8.3.9'
 }
 
 repositories {
     mavenCentral()
 }
 
+def asyncProfilerDistDir = file("$rootDir/async-profiler-grafana-fork-dist/lib")
 def pyroscopeVersion = project.properties['pyroscope_version']
 dependencies {
-    api project(":async-profiler-context")
+    api files("$asyncProfilerDistDir/async-profiler.jar")
     compileOnly 'org.jetbrains:annotations:26.0.2-1'
-    implementation('com.squareup.okhttp3:okhttp:4.12.0')
-    implementation("com.squareup.moshi:moshi:1.15.2")
-    implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.3.0")
-    api 'com.google.protobuf:protobuf-java:4.33.5'
+    implementation 'com.google.protobuf:protobuf-java:4.33.5'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.14.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation group: 'org.mockito', name: 'mockito-core', version: '3.12.4'
     testImplementation group: 'org.mockito', name: 'mockito-junit-jupiter', version: '3.12.4'
 }
 
-javadoc{
-    // excluded as javadoc generation fails on inaccessible sun.management.VMManagement class
-    exclude("io/pyroscope/javaagent/CurrentPidProvider.java")
-}
-
 jar {
-    manifest {
-        attributes(
-                'Premain-Class': 'io.pyroscope.javaagent.PyroscopeAgent'
-        )
+    from(asyncProfilerDistDir) {
+        include "**.so"
+        include "**.so.sha1"
     }
 }
 
 test {
     useJUnitPlatform()
+    maxHeapSize = "1g"
+    jvmArgs '-XX:MaxMetaspaceSize=512m'
+    workingDir = rootDir
 }
 
 java {
@@ -54,22 +47,18 @@ shadowJar {
     exclude 'META-INF/org/apache/logging/log4j/**'
     exclude 'META-INF/services/**'
 
-    from("$buildDir/async-profiler/native") {
+    from(asyncProfilerDistDir) {
         include "**.so"
         include "**.so.sha1"
     }
 
-    archiveFileName = "pyroscope.jar"
+    archiveFileName = "async-profiler-context.jar"
 
     minimize()
     archiveClassifier.set('')
+
     relocate("com.google",    "io.pyroscope.vendor.com.google")
     relocate("one.profiler",  "io.pyroscope.vendor.one.profiler")
-    relocate("okio",  "io.pyroscope.vendor.okio")
-    relocate("okhttp3",  "io.pyroscope.vendor.okhttp3")
-    relocate("kotlin",  "io.pyroscope.vendor.kotlin")
-    relocate("com",  "io.pyroscope.vendor.com")
-
     dependencies {
         exclude "org/jetbrains/**"
         exclude "org/intellij/**"
@@ -77,17 +66,18 @@ shadowJar {
     }
 }
 
+
 publishing {
     publications {
         shadow(MavenPublication) { publication ->
             project.shadow.component(publication)
             groupId = 'io.pyroscope'
-            artifactId = 'agent'
+            artifactId = 'async-profiler-context'
             version = pyroscopeVersion
             artifacts = [ shadowJar, javadocJar, sourcesJar ]
             pom {
                 name = 'Pyroscope Java agent'
-                description = 'The Java profiling agent for Pyroscope.io. Based on async-profiler.'
+                description = 'async-profiler fork with contextID functionality and bundled shared libs'
                 url = 'https://pyroscope.io'
                 licenses {
                     license {
@@ -131,6 +121,17 @@ afterEvaluate {
             dependsOn 'jar'
             dependsOn 'sourcesJar'
             dependsOn 'javadocJar'
+        }
+    }
+}
+
+tasks.register('generate-proto-classes') {
+    doLast {
+        exec {
+            commandLine 'protoc',
+                '-I', '.',
+                '--java_out', 'src/main/java',
+                'jfr_labels.proto'
         }
     }
 }
